@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Debian 13. Install: sudo bash install.sh [CDT GB already used this month]
+# Debian 13. Install as root: bash install.sh [CDT GB already used this month]
 set -euo pipefail
-[[ $EUID == 0 ]] || { echo 'Run with sudo.' >&2; exit 1; }
+[[ $EUID == 0 ]] || { echo 'Run this installer as root.' >&2; exit 1; }
 [[ $# -le 1 ]] || { echo 'Usage: install.sh [CDT GB already used]' >&2; exit 1; }
 used=${1-}
 if [[ ! -f /var/lib/traffic-stop/state.json && -z $used ]]; then
@@ -71,6 +71,6 @@ UNIT
 
 systemctl daemon-reload
 systemctl enable --now traffic-stop.timer
-echo 'Logs: sudo journalctl -u traffic-stop.service -n 10 --no-pager'
-echo 'Enable shutdown: sudo touch /var/lib/traffic-stop/enabled'
-echo 'Pause shutdown: sudo rm -f /var/lib/traffic-stop/enabled'
+echo 'Logs: journalctl -u traffic-stop.service -n 10 --no-pager'
+echo 'Enable shutdown: touch /var/lib/traffic-stop/enabled'
+echo 'Pause shutdown: rm -f /var/lib/traffic-stop/enabled'
