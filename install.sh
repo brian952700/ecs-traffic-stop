@@ -70,6 +70,7 @@ ok "出口网卡：$iface"
 
 step '[2/3] 配置出站流量统计'
 
+install -d -m 0755 /usr/local/sbin
 install -d -m 0700 /var/lib/traffic-stop
 printf '%s\n' "$iface" > /etc/traffic-stop-interface
 cat > /usr/local/sbin/traffic-stop.py <<'PY'
