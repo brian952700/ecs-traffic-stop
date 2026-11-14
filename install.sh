@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Debian 13. Install as root: bash install.sh [CDT GB already used this month]
+# Debian 13 / Alpine 3.23.8+. Install as root: bash install.sh [CDT GB already used this month]
 set -euo pipefail
 blue= green= yellow= red= reset=
 if [[ -t 1 && ${TERM:-dumb} != dumb && -z ${NO_COLOR:-} ]]; then
@@ -23,12 +23,31 @@ run_quiet() {
     fi
 }
 
-printf '\n%sECS 流量守护 · Debian 13%s\n' "$blue" "$reset"
+printf '\n%sECS 流量守护%s\n' "$blue" "$reset"
 printf '%s\n' '----------------------------------------'
 step '[1/3] 检查运行环境'
 [[ $EUID == 0 ]] || fail '请在 root 终端运行安装脚本。'
 [[ $# -le 1 ]] || fail '用法：bash install.sh [CDT 本月已用 GB]'
-for dependency in python3 ip systemctl; do
+source /etc/os-release
+case "$ID" in
+    alpine)
+        IFS=. read -r major minor patch <<< "$VERSION_ID"
+        [[ ${major:-} =~ ^[0-9]+$ && ${minor:-} =~ ^[0-9]+$ && ${patch:-} =~ ^[0-9]+$ ]] ||
+            fail "无法识别 Alpine 版本：$VERSION_ID"
+        (( major > 3 || (major == 3 && (minor > 23 || (minor == 23 && patch >= 8))) )) ||
+            fail '需要 Alpine 3.23.8 或更新版本。'
+        command -v rc-service >/dev/null && command -v rc-update >/dev/null ||
+            fail '需要运行 OpenRC 的 Alpine 主机。'
+        if ! command -v python3 >/dev/null || [[ ! -x /etc/init.d/crond ]]; then
+            run_quiet apk add --no-cache python3 busybox-openrc
+        fi
+        ;;
+    debian) command -v systemctl >/dev/null || fail '需要 systemd。' ;;
+    *) fail "不支持的系统：$ID" ;;
+esac
+ok "${PRETTY_NAME:-$ID}"
+
+for dependency in python3 ip; do
     command -v "$dependency" >/dev/null || fail "缺少命令：$dependency"
 done
 
@@ -57,6 +76,7 @@ cat > /usr/local/sbin/traffic-stop.py <<'PY'
 import json
 import os
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -84,13 +104,15 @@ temporary.replace(state_file)
 enabled = (directory / "enabled").exists()
 print(f"{month} {iface}: {used / 1_000_000_000:.3f} GB; poweroff={enabled}", flush=True)
 if enabled and used >= 180_000_000_000:
-    subprocess.run(["systemctl", "poweroff"], check=True)
+    command = ["/sbin/poweroff"] if "--alpine" in sys.argv[1:] else ["systemctl", "poweroff"]
+    subprocess.run(command, check=True)
 PY
 
 if [[ ! -f /var/lib/traffic-stop/state.json ]]; then
     USED_GB="$used" run_quiet python3 /usr/local/sbin/traffic-stop.py
 fi
 
+if [[ $ID == debian ]]; then
 cat > /etc/systemd/system/traffic-stop.service <<'UNIT'
 [Service]
 Type=oneshot
@@ -106,13 +128,34 @@ AccuracySec=1s
 WantedBy=timers.target
 UNIT
 
-ok '统计脚本和 systemd 单元已配置'
+    log_command='journalctl -u traffic-stop.service -n 10 --no-pager'
+else
+    log_command='cat /var/lib/traffic-stop/last-run.log'
+fi
+ok '统计脚本已配置'
 
 step '[3/3] 启动每分钟定时检查'
-run_quiet systemctl daemon-reload
-run_quiet systemctl enable --now traffic-stop.timer
-run_quiet systemctl is-active traffic-stop.timer
-ok '定时器运行中'
+if [[ $ID == debian ]]; then
+    run_quiet systemctl daemon-reload
+    run_quiet systemctl enable --now traffic-stop.timer
+    run_quiet systemctl is-active traffic-stop.timer
+else
+    [[ -x /sbin/poweroff ]] || fail '找不到 /sbin/poweroff。'
+    run_quiet rc-update add crond default
+    run_quiet rc-service crond start
+    run_quiet rc-service crond status
+    cron_job='* * * * * /usr/bin/python3 /usr/local/sbin/traffic-stop.py --alpine > /var/lib/traffic-stop/last-run.log 2>&1 # ecs-traffic-stop'
+    if ! cron_entries=$(LC_ALL=C crontab -l 2>&1); then
+        case "$cron_entries" in
+            *'No such file or directory'*|*'no crontab for root'*) cron_entries= ;;
+            *) fail "$cron_entries" ;;
+        esac
+    fi
+    if ! { printf '%s\n' "$cron_entries" | awk '!/ # ecs-traffic-stop$/'; printf '%s\n' "$cron_job"; } | crontab -; then
+        fail '无法更新 root 的 crontab。'
+    fi
+fi
+ok '每分钟检查已启用'
 
 usage=$(python3 - "$state_file" <<'PY'
 import json
@@ -135,6 +178,6 @@ if [[ -f /var/lib/traffic-stop/enabled ]]; then
 else
     printf '  自动关机      %s已关闭 · 当前只统计%s\n' "$yellow" "$reset"
 fi
-printf '\n  查看用量  journalctl -u traffic-stop.service -n 10 --no-pager\n'
+printf '\n  查看用量  %s\n' "$log_command"
 printf '  开启关机  touch /var/lib/traffic-stop/enabled\n'
 printf '  暂停关机  rm -f /var/lib/traffic-stop/enabled\n\n'
